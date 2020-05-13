@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include<stdlib.h>
+#include<memory.h>
 #include <pcap.h> // PCAP 라이브러리 가져오기
 #include <arpa/inet.h> // inet_ntoa 등 함수 포함
 #include <netinet/in.h> // in_addr 등 구조체 포함
@@ -13,7 +15,9 @@ bpf_u_int32 net; // 아이피 주소
 struct pcap_pkthdr *header; // 패킷 관련 정보
 const u_char *packet; // 실제 패킷
 struct in_addr addr; // 주소 정보
-
+struct in_addr taddr;
+u_char mymac[6]={0,12,41,51,19,211};
+u_char tmac[6];
 #define ETHER_ADDR_LEN 6
 
 struct sniff_ethernet {
@@ -67,7 +71,20 @@ struct sniff_tcp {
 };
 
 #define SIZE_ETHERNET 14
-
+struct arp_header
+{
+    u_short hrd_type;//2 ethernet:1
+    u_short proto_type;//4 upper protocol:0800
+    u_char hrd_len;//5  mac legth:6
+    u_char proto_len;//6 ip protocol length:4
+    uint16_t oper;//8 arpreq: 0001 reply:0002 rarpreq: 0003 rarpreply: 0004
+    uint8_t s_mac[6]; //14
+    uint8_t s_ip[4]; // 18
+    uint8_t t_mac[6]; //24
+    uint8_t t_ip[4]; // 28
+};
+#define SIZE_ARP 28
+struct sniff_arp* arppck;
 struct sniff_ethernet *ethernet; // 이더넷 헤더
 struct sniff_ip *ip; // IP 헤더
 struct sniff_tcp *tcp; // TCP 혜더
@@ -76,54 +93,87 @@ char *payload; // 페이로드
 
 u_int size_ip;
 u_int size_tcp;
+void getmac(struct in_addr targetip){
+        u_char* arpsend;
+        arpsend=malloc(sizeof(u_char)*(SIZE_ETHERNET+SIZE_ARP));
+        memset(arpsend,0,sizeof(u_char)*(SIZE_ETHERNET+SIZE_ARP));
+        struct sniff_ethernet* ethpckt=malloc(sizeof(struct sniff_ethernet));
+        struct arp_header* arppckt=(struct arp_header*)(arpsend+SIZE_ETHERNET);
 
-void parsing() {
-        struct sniff_tcp dummy;
-	printf("------------------------------------------------------\n");
-        int i, payload_len;
-        ethernet = (struct sniff_ethernet*)(packet);
-        printf("MAC 출발지 주소 :");
-        for(i = 0; i < ETHER_ADDR_LEN; i++) {
-                printf("%02x ", ethernet->ether_shost[i]);
-        }
-        printf("\nMAC 목적지 주소 :");
-        for(i = 0; i < ETHER_ADDR_LEN; i++) {
-                printf("%02x ", ethernet->ether_dhost[i]);
-        }
-        printf("\nMAC 목적지 주소 :");
-        for(i = 0; i < ETHER_ADDR_LEN; i++) {
-                printf("%02x ", ethernet->ether_dhost[i]);
-        }
-        ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
-        size_ip = IP_HL(ip)*4;
-        printf("\nIP 출발지 주소: %s\n", inet_ntoa(ip->ip_src));
-        printf("IP 목적지 주소: %s\n", inet_ntoa(ip->ip_dst));
-        
-	tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
-        tcp_dummy=(struct sniff_tcp*)malloc(sizeof(dummy));
+        for(int i=0; i<6; i++)
+                ethpckt->ether_dhost[i]=0xFF;
+        memcpy(ethpckt->ether_shost,mymac,6);
+        ethpckt->ether_type=htons(0x0806);
+        arppckt->hrd_type=htons(0x0001);
+        arppckt->proto_type=htons(0x0800);
+        arppckt->hrd_len=0x06;        
+        arppckt->proto_len=0x04;
+        arppckt->oper=htons(0x0001);
+        memcpy(arppckt->s_mac,mymac,6);
+        memcpy(&(arppckt->s_ip),&addr,4);
+        for(int i=0; i<6; i++)
+                arppckt->t_mac[i]=0x0;
+        memcpy(&(arppckt->t_ip),&targetip,4);
+        memcpy(arpsend,ethpckt,sizeof(struct sniff_ethernet));
+        struct pcap_pkthdr* head;
 
-	memcpy(tcp_dummy,tcp,sizeof(tcp));
-	tcp_dummy->th_seq=htonl(00000000);
-	memcpy(tcp, tcp_dummy, sizeof(tcp));
-	size_tcp = TH_OFF(tcp)*4;
-        printf("출발지 포트: %d\n", ntohs(tcp->th_sport));
-        printf("목적지 포트: %d\n", ntohs(tcp->th_dport));
-        payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
-        payload_len = ntohs(ip->ip_len) - (size_ip + size_tcp);
-        if(payload_len == 0) printf("페이로드 데이터가 없습니다.");
-        else {
-                printf("< 페이로드 데이터 >\n");
-                for(int i = 1; i < payload_len; i++) {
-                        printf("%02x ", payload[i - 1]);
-                        if(i % 8 == 0) printf("  ");
-                        if(i % 16 == 0) printf("\n");
+        while(1){
+                pcap_sendpacket(handle, arpsend, SIZE_ETHERNET+ SIZE_ARP);
+                int a=pcap_next_ex(handle, &head,&packet);
+                struct sniff_ethernet* geteth=(struct sniff_ethernet*)packet;
+                struct arp_header* getarp=(struct arp_header*)(packet+SIZE_ETHERNET);
+                if(ntohs(geteth->ether_type)==0x0806&&memcmp(&(getarp->s_ip),&targetip,4)==0){
+                        memcpy(tmac,geteth->ether_shost,6);
+                        break;
                 }
+                sleep(1);
         }
-        printf("\n------------------------------------------------------\n");
+        for(int i=0; i<6; i++)
+        printf("%x ",tmac[i]);
+        printf("\n");
 }
-
+/*
+void send_arp(struct in_addr senderip, struct in_addr targetip, u_char senderMAC[ETHER_ADDR_LEN],u_char targetMAC[ETHER_ADDR_LEN]){
+        packet=malloc(sizeof(const u_char)*(SIZE_ETHERNET+SIZE_ARP));
+        struct sniff_ethernet* ethpckt=malloc(sizeof(struct sniff_ethernet));
+        struct arp_header* arppckt=malloc(sizeof(struct arp_header));
+        memcpy(ethpckt->ether_dhost,targetMAC,6);
+        memcpy(ethpckt->ether_shost,senderMAC,6);
+        ethpckt->ether_type=htons(0x0806);
+        arppckt->hrd_type=htons(0x0001);
+        arppckt->proto_len=0x06;
+        arppckt->oper=0x04;
+        memcpy(arppckt->s_mac,senderMAC,6);
+        memcpy(&(arppckt->s_ip),&senderip,4);
+        memset(arppckt->t_mac,0,6);
+        //memcpy(&(arppckt->t_ip),&)
+        
+        /*
+  struct arp_header
+{
+    u_short hrd_type;//2 ethernet:1
+    u_short proto_type;//4 upper protocol:0800
+    u_char hrd_len;//5  mac legth:6
+    u_char proto_len;//6 ip protocol length:4
+    u_short oper;//8 arpreq: 0001 reply:0002 rarpreq: 0003 rarpreply: 0004
+    u_char s_mac[6]; //14
+    struct in_addr s_ip; // 18
+    u_char t_mac[6]; //24
+    struct in_addr t_ip; // 28
+};
+        
+}
+*/
 int main(void) {
         //printf("Eth headersize: %d\tTcp headersize: %d\tIP headersize: %d\n",sizeof(struct sniff_ethernet),sizeof(struct sniff_tcp),sizeof(struct sniff_ip));
+        char targetip[20];
+        char myipip[20];
+        struct in_addr targetaddr;
+        printf("Target ip:");
+        gets(targetip);
+        printf("my ip:");
+        gets(myipip);
+        targetaddr.s_addr=inet_addr(targetip);
         dev = pcap_lookupdev(errbuf);
         if (dev == NULL) {
                 printf("네트워크 장치를 찾을 수 없습니다.\n");
@@ -134,26 +184,13 @@ int main(void) {
                 printf("장치의 주소를 찾을 수 없습니다.\n");
                 return 0;
         }
-        addr.s_addr = net;
+        addr.s_addr = inet_addr(myipip);
         printf("나의 IP주소: %s\n", inet_ntoa(addr));
-        addr.s_addr = mask;
-        printf("나의 서브넷 마스크: %s\n", inet_ntoa(addr));
         handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
         if (handle == NULL) {
                 printf("장치를 열 수 없습니다.\n");
                 return 0;
         }
-        if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
-                printf("필터를 적용할 수 없습니다.\n");
-                return 0;
-        }
-        if (pcap_setfilter(handle, &fp) == -1) {
-                printf("필터를 세팅할 수 없습니다.\n");
-                return 0;
-        }
-        printf("패킷을 감지합니다.\n");
-        while(pcap_next_ex(handle, &header, &packet) == 1) {
-                parsing();
-        }
+        getmac(targetaddr);
 	return 0;
 }
